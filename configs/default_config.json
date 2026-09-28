@@ -1,0 +1,22 @@
+{
+    "grid_cols": 30,
+    "grid_rows": 22,
+    "target_fps": 60,
+    "robot_base_speed": 4.0,
+    "obstacle_density_low": 0.10,
+    "obstacle_density_medium": 0.20,
+    "obstacle_density_high": 0.32,
+    "dynamic_obstacle_speed": 2.0,
+    "num_dynamic_obstacles": 3,
+    "replan_interval_seconds": 0.25,
+    "allow_diagonal": false,
+    "sensor_device": "/dev/warehouse_sensor",
+    "log_file": "logs/warehouse_robot.log",
+    "log_level": "INFO",
+    "debug_mode": false,
+    "show_path": true,
+    "show_explored": false,
+    "window_width": 1280,
+    "window_height": 780,
+    "panel_width": 280
+}
