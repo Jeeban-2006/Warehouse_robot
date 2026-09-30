@@ -131,7 +131,7 @@ private:
     float m_replanTimer{0.0f};
     float m_replanBannerTimer{0.0f};
     bool  m_replanBanner{false};
-    int   m_sensorSeq{0};
+    mutable int   m_sensorSeq{0};
 
     // ── Internal helpers ──────────────────────────────────────────────────
     void doPlanning();
