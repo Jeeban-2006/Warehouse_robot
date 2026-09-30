@@ -1,355 +1,238 @@
-// SimulationEngine.cpp - Top-level simulation orchestrator.
 #include "core/SimulationEngine.hpp"
-#include "system/Logger.hpp"
-
-#include <random>
-#include <algorithm>
-#include <sstream>
-#include <chrono>
-#include <cmath>
+#include <iostream>
 
 namespace warehouse {
 
-// ── Default dynamic obstacle positions ───────────────────────────────────────
-struct DynObsDef {
-    int col, row;
-    ObstacleAxis axis;
-    int minPos, maxPos;
-    float speed;
-};
-static const DynObsDef DEFAULT_DYN[] = {
-    {8,  6,  ObstacleAxis::HORIZONTAL, 8,  15, 2.0f},
-    {16, 11, ObstacleAxis::VERTICAL,  10,  17, 1.5f},
-    {23, 7,  ObstacleAxis::HORIZONTAL, 22, 27, 2.5f},
-};
+std::string simStateStr(SimState s) {
+    switch(s) {
+        case SimState::IDLE: return "IDLE";
+        case SimState::RUNNING: return "RUNNING";
+        case SimState::PAUSED: return "PAUSED";
+        case SimState::NO_PATH: return "NO_PATH";
+        case SimState::COMPLETED: return "COMPLETED";
+        default: return "UNKNOWN";
+    }
+}
 
-// ── Constructor ───────────────────────────────────────────────────────────────
-SimulationEngine::SimulationEngine(SimConfig cfg)
-    : m_cfg(cfg)
+SimulationEngine::SimulationEngine(const SimConfig& config)
+    : m_config(config), m_state(SimState::IDLE), m_sensorProc(15.0f) 
 {
-    m_grid    = std::make_unique<Grid>(cfg.gridCols, cfg.gridRows);
-    m_robot   = std::make_unique<Robot>(0,
-                                        std::make_pair(1, 1),
-                                        std::make_pair(28, 20),
-                                        cfg.cellSize, cfg.robotBaseSpeed);
+    m_grid = std::make_unique<Grid>(config.gridCols, config.gridRows);
+    m_robot = std::make_unique<Robot>(1, std::make_pair(1,1), std::make_pair(config.gridCols-2, config.gridRows-2), config.cellSize, config.robotSpeed);
     m_planner = std::make_unique<AStarPlanner>(*m_grid);
+    m_statusMessage = "Engine initialized.";
     loadDefaultMap();
 }
 
-// ── Map management ────────────────────────────────────────────────────────────
-void SimulationEngine::loadDefaultMap() {
-    m_grid->loadDefaultMap(m_robot->startPos(), m_robot->goalPos());
-    m_robot->reset();
-    createDefaultDynObs();
-    m_lastPathResult = {};
-    m_statusMsg = "Press START to begin.";
-    m_state = SimState::IDLE;
-    LOG_INFO("Warehouse: default map loaded");
+void SimulationEngine::start() {
+    if (m_state == SimState::IDLE || m_state == SimState::NO_PATH || m_state == SimState::COMPLETED) {
+        m_state = SimState::RUNNING;
+        m_metrics.elapsedSeconds = 0.0f;
+        triggerReplan();
+    }
 }
 
-void SimulationEngine::generateRandomMap(float den) {
-    auto rp = m_robot->startPos();
-    auto gp = m_robot->goalPos();
-    std::vector<std::pair<int,int>> prot;
-    prot.push_back(rp); prot.push_back(gp);
-    // Protect neighbours for connectivity
-    for (auto [dc,dr] : std::vector<std::pair<int,int>>{{0,1},{0,-1},{1,0},{-1,0}}) {
-        prot.push_back({rp.first+dc, rp.second+dr});
-        prot.push_back({gp.first+dc, gp.second+dr});
+void SimulationEngine::pause() {
+    if (m_state == SimState::RUNNING) {
+        m_state = SimState::PAUSED;
+        m_robot->pause();
+        m_statusMessage = "Simulation paused.";
     }
-    m_grid->generateRandom(den, prot);
-    m_robot->reset();
-    createRandomDynObs();
-    m_lastPathResult = {};
+}
+
+void SimulationEngine::resume() {
+    if (m_state == SimState::PAUSED) {
+        m_state = SimState::RUNNING;
+        m_robot->resume();
+        m_statusMessage = "Simulation resumed.";
+    }
+}
+
+void SimulationEngine::reset() {
     m_state = SimState::IDLE;
-    m_statusMsg = "Random map generated.";
-    LOG_INFO("Warehouse: random map generated density=" + std::to_string(den));
+    m_robot->reset();
+    m_dynObs.clear();
+    // In a real system, we'd reload the default dynamic obstacles, but for now we'll just clear them or reload them via loadDefaultMap.
+    loadDefaultMap(); // Note: this will also reset the grid and robot positions.
+    // Actually, let's just clear and let the user generate them or reload map explicitly.
+    m_metrics = Metrics();
+    m_replanTimer = 0.0f;
+    m_statusMessage = "Simulation reset.";
+}
+
+void SimulationEngine::update(float dt) {
+    if (m_state != SimState::RUNNING) return;
+    
+    m_metrics.elapsedSeconds += dt;
+    m_replanTimer += dt;
+
+    // Update dynamic obstacles
+    if (dynamicObsEnabled) {
+        for (auto& o : m_dynObs) o->update(dt * speedMultiplier);
+    }
+
+    // LiDAR & Sensors
+    updateSensorData();
+
+    // Check battery state
+    if (m_robot->needsCharging() && m_robot->state() != RobotState::CHARGING && m_robot->state() != RobotState::IDLE) {
+        // Simple logic to find a charging station (just one specific pos for demo)
+        setRobotGoal(1, 5); // Usually where chargers are placed in realistic map
+        triggerReplan();
+        m_statusMessage = "LOW BATTERY! Routing to charger.";
+    }
+
+    // Robot state execution
+    m_robot->update(dt, speedMultiplier);
+
+    // Replanning based on interval or path blockage
+    if (m_robot->hasPath() && m_replanTimer >= m_config.replanInterval) {
+        m_replanTimer = 0.0f;
+        PosSet extra;
+        if (dynamicObsEnabled) {
+            for (auto& o : m_dynObs) {
+                auto p = o->pos();
+                extra.insert(p);
+            }
+        }
+        if (!m_planner->isPathValid(m_robot->path(), extra)) {
+            m_metrics.replanCount++;
+            triggerReplan();
+        }
+    }
+
+    if (m_robot->state() == RobotState::REACHED_GOAL && m_robot->currentTask() == nullptr) {
+        m_state = SimState::COMPLETED;
+        m_statusMessage = "Goal reached!";
+    }
+}
+
+void SimulationEngine::triggerReplan() {
+    PosSet extra;
+    if (dynamicObsEnabled) {
+        for (auto& o : m_dynObs) {
+            auto p = o->pos();
+            extra.insert(p);
+        }
+    }
+
+    auto start = m_robot->pos();
+    auto goal = m_robot->goalPos();
+    auto res = m_planner->findPath(start, goal, extra);
+
+    m_metrics.totalPathCalls++;
+    m_metrics.lastPlanTimeMs = res.planningTimeMs;
+    m_metrics.lastNodesExplored = res.nodesExplored;
+
+    if (res.success) {
+        m_metrics.lastPathLength = res.pathLength;
+        m_robot->setPath(res.path);
+        m_robot->setState(RobotState::MOVING);
+        m_statusMessage = "Path found (" + std::to_string(res.pathLength) + " cells)";
+        if (m_state == SimState::NO_PATH) m_state = SimState::RUNNING;
+    } else {
+        m_robot->clearPath();
+        m_robot->setState(RobotState::BLOCKED);
+        m_state = SimState::NO_PATH;
+        m_statusMessage = "No valid path: " + res.message;
+    }
+}
+
+void SimulationEngine::findPathOnly() {
+    triggerReplan();
+}
+
+void SimulationEngine::setRobotStart(int c, int r) {
+    if (m_grid->inBounds(c, r) && m_grid->isFree(c, r)) {
+        m_robot->setStartPos({c, r});
+        m_statusMessage = "Start position updated.";
+    }
+}
+
+void SimulationEngine::setRobotGoal(int c, int r) {
+    if (m_grid->inBounds(c, r) && m_grid->isFree(c, r)) {
+        m_robot->setGoalPos({c, r});
+        m_statusMessage = "Goal position updated.";
+        if (m_state == SimState::RUNNING) {
+            triggerReplan();
+        }
+    }
+}
+
+void SimulationEngine::assignTask(int pickupCol, int pickupRow, int dropCol, int dropRow) {
+    auto task = std::make_shared<Task>(++m_taskCounter, std::make_pair(pickupCol, pickupRow), std::make_pair(dropCol, dropRow), 1, "Package");
+    m_robot->assignTask(task);
+    setRobotGoal(pickupCol, pickupRow); // First go to pickup
+    m_statusMessage = "Task Assigned! Routing to pickup.";
+    start();
+}
+
+void SimulationEngine::setObstacle(int c, int r, bool isObs) {
+    if (!m_grid->inBounds(c, r)) return;
+    auto rp = m_robot->pos();
+    if (c == rp.first && r == rp.second) return;
+    auto gp = m_robot->goalPos();
+    if (c == gp.first && r == gp.second) return;
+    
+    m_grid->setObstacle(c, r, isObs);
+}
+
+void SimulationEngine::removeObstacle(int c, int r) {
+    m_grid->setObstacle(c, r, false);
 }
 
 void SimulationEngine::clearObstacles() {
     m_grid->clear();
-    m_robot->reset();
-    m_lastPathResult = {};
-    m_state = SimState::IDLE;
-    m_statusMsg = "Map cleared.";
-}
-
-void SimulationEngine::setObstacle(int col, int row, bool value) {
-    auto rp = m_robot->pos();
-    auto gp = m_robot->goalPos();
-    if (std::make_pair(col,row) == rp) return;
-    if (std::make_pair(col,row) == gp) return;
-    m_grid->setObstacle(col, row, value);
-    m_robot->clearPath();
-    m_state = SimState::IDLE;
-}
-
-void SimulationEngine::removeObstacle(int col, int row) {
-    m_grid->setObstacle(col, row, false);
-}
-
-void SimulationEngine::setRobotStart(int col, int row) {
-    if (m_grid->isObstacle(col, row)) return;
-    if (std::make_pair(col,row) == m_robot->goalPos()) return;
-    m_robot->setStartPos({col, row});
-    m_state = SimState::IDLE;
-}
-
-void SimulationEngine::setRobotGoal(int col, int row) {
-    if (m_grid->isObstacle(col, row)) return;
-    if (std::make_pair(col,row) == m_robot->pos()) return;
-    m_robot->setGoalPos({col, row});
-    m_state = SimState::IDLE;
-}
-
-// ── Control ───────────────────────────────────────────────────────────────────
-void SimulationEngine::start() {
-    if (m_state == SimState::RUNNING) return;
-    m_metrics.reset();
-    m_metrics.elapsedSeconds = 0.0;
-    m_state = SimState::PLANNING;
-    m_statusMsg = "Planning path...";
-    LOG_INFO("Simulation started");
-    doPlanning();
-}
-
-void SimulationEngine::pause() {
-    if (m_state != SimState::RUNNING) return;
-    m_state = SimState::PAUSED;
-    m_robot->pause();
-    m_statusMsg = "Simulation paused.";
-    LOG_INFO("Simulation paused");
-}
-
-void SimulationEngine::resume() {
-    if (m_state != SimState::PAUSED) return;
-    m_state = SimState::RUNNING;
-    m_robot->resume();
-    m_statusMsg = "Simulation running.";
-    LOG_INFO("Simulation resumed");
-}
-
-void SimulationEngine::reset() {
-    m_robot->reset();
-    for (auto& obs : m_dynObs)
-        obs->reset(obs->col(), obs->row());
-    m_state = SimState::IDLE;
-    m_metrics.reset();
-    m_replanTimer = 0.0f;
-    m_replanBanner = false;
-    m_lastPathResult = {};
-    m_statusMsg = "Press START to begin.";
-    LOG_INFO("Simulation reset");
-}
-
-void SimulationEngine::fullReset() {
-    loadDefaultMap();
-    reset();
-}
-
-void SimulationEngine::findPathOnly() {
-    auto extra = dynObsPositions();
-    m_lastPathResult = m_planner->findPath(m_robot->pos(), m_robot->goalPos(), extra);
-    m_metrics.recordPlanResult(m_lastPathResult.success,
-                               m_lastPathResult.pathLength,
-                               m_lastPathResult.nodesExplored,
-                               m_lastPathResult.planningTimeMs);
-    if (m_lastPathResult.success) {
-        m_robot->setPath(m_lastPathResult.path);
-        // Keep robot in IDLE: path displayed but not moving
-        if (m_state != SimState::RUNNING)
-            m_robot->pause();
-        m_statusMsg = "Path found: " + std::to_string(m_lastPathResult.pathLength) + " cells.";
-        LOG_INFO("Path found: " + std::to_string(m_lastPathResult.pathLength) + " cells");
-    } else {
-        m_robot->clearPath();
-        m_state = SimState::NO_PATH;
-        m_statusMsg = m_lastPathResult.message;
-        LOG_WARN("No path: " + m_lastPathResult.message);
-    }
-}
-
-// ── Per-frame update ──────────────────────────────────────────────────────────
-void SimulationEngine::update(float dt) {
-    if (m_state == SimState::RUNNING) {
-        m_metrics.elapsedSeconds += dt;
-        updateDynObs(dt);
-        checkAndReplan(dt);
-        m_robot->update(dt, speedMultiplier);
-        checkCompletion();
-    }
-
-    // Decay replanning banner
-    if (m_replanBanner) {
-        m_replanBannerTimer -= dt;
-        if (m_replanBannerTimer <= 0.0f)
-            m_replanBanner = false;
-    }
-}
-
-// ── Internal helpers ──────────────────────────────────────────────────────────
-void SimulationEngine::doPlanning() {
-    auto extra = dynObsPositions();
-    m_lastPathResult = m_planner->findPath(m_robot->pos(), m_robot->goalPos(), extra);
-    m_metrics.recordPlanResult(m_lastPathResult.success,
-                               m_lastPathResult.pathLength,
-                               m_lastPathResult.nodesExplored,
-                               m_lastPathResult.planningTimeMs);
-    if (m_lastPathResult.success) {
-        m_robot->setPath(m_lastPathResult.path);
-        m_state = SimState::RUNNING;
-        m_statusMsg = "Moving - path: " + std::to_string(m_lastPathResult.pathLength) + " cells.";
-        LOG_INFO("Path found: " + std::to_string(m_lastPathResult.pathLength) + " cells, " +
-                 std::to_string(m_lastPathResult.nodesExplored) + " explored, " +
-                 std::to_string(m_lastPathResult.planningTimeMs) + " ms");
-    } else {
-        m_state = SimState::NO_PATH;
-        m_statusMsg = m_lastPathResult.message;
-        LOG_WARN("Pathfinding failed: " + m_lastPathResult.message);
-    }
-}
-
-void SimulationEngine::updateDynObs(float dt) {
-    if (!dynamicObsEnabled) return;
-    for (auto& obs : m_dynObs)
-        obs->update(dt, speedMultiplier);
-}
-
-void SimulationEngine::checkAndReplan(float dt) {
-    m_replanTimer -= dt;
-    if (m_replanTimer > 0.0f) return;
-    m_replanTimer = m_cfg.replanInterval;
-
-    if (m_robot->state() != RobotState::MOVING) return;
-    if (!isCurrentPathValid()) {
-        m_metrics.incrementReplans();
-        m_replanBanner = true;
-        m_replanBannerTimer = 2.0f;
-        m_statusMsg = "PATH BLOCKED - REPLANNING...";
-        LOG_WARN("Path blocked, replanning. Replan #" +
-                 std::to_string(m_metrics.replanCount));
-        m_robot->setPlanning();
-        doPlanning();
-        if (m_lastPathResult.success)
-            m_statusMsg = "Replanned: " +
-                          std::to_string(m_lastPathResult.pathLength) + " cells.";
-    }
-}
-
-bool SimulationEngine::isCurrentPathValid() const {
-    auto remaining = m_robot->remainingPath();
-    if (remaining.empty()) return false;
-    auto extra = dynObsPositions();
-    return m_planner->isPathValid(remaining, extra);
-}
-
-void SimulationEngine::checkCompletion() {
-    if (m_robot->state() == RobotState::REACHED_GOAL) {
-        m_state = SimState::COMPLETED;
-        std::ostringstream oss;
-        oss << "Goal reached! Path=" << m_metrics.lastPathLength
-            << " cells, Replans=" << m_metrics.replanCount
-            << ", Time=" << std::fixed << std::setprecision(1)
-            << m_metrics.elapsedSeconds << "s";
-        m_statusMsg = oss.str();
-        LOG_INFO("Robot reached goal. " + m_metrics.summary());
-    } else if (m_robot->state() == RobotState::ERROR) {
-        m_state = SimState::NO_PATH;
-    }
-}
-
-PosSet SimulationEngine::dynObsPositions() const {
-    PosSet s;
-    for (const auto& obs : m_dynObs)
-        s.insert(obs->pos());
-    return s;
-}
-
-void SimulationEngine::createDefaultDynObs() {
     m_dynObs.clear();
-    int id = 0;
-    for (const auto& d : DEFAULT_DYN) {
-        m_dynObs.push_back(
-            std::make_unique<DynamicObstacle>(id++, d.col, d.row,
-                                              d.axis, d.minPos, d.maxPos,
-                                              d.speed, m_cfg.cellSize));
-    }
+    m_statusMessage = "Map cleared.";
 }
 
-void SimulationEngine::createRandomDynObs() {
+void SimulationEngine::loadDefaultMap() {
+    m_grid->generateRealisticWarehouse();
+    
+    // Add dynamic obstacles mimicking patrol workers
     m_dynObs.clear();
-    auto free = m_grid->freeCells();
-    auto rp   = m_robot->startPos();
-    auto gp   = m_robot->goalPos();
-    free.erase(std::remove_if(free.begin(), free.end(),
-        [&](auto p){ return p == rp || p == gp; }), free.end());
+    m_dynObs.push_back(std::make_unique<DynamicObstacle>(0, 10, 6, ObstacleAxis::HORIZONTAL, 10, 50, 2.0f, m_config.cellSize));
+    m_dynObs.push_back(std::make_unique<DynamicObstacle>(1, 30, 2, ObstacleAxis::VERTICAL, 2, 40, 3.0f, m_config.cellSize));
 
-    std::mt19937 rng(std::random_device{}());
-    std::shuffle(free.begin(), free.end(), rng);
-
-    int n = std::min(m_cfg.numDynObs, static_cast<int>(free.size()));
-    std::uniform_int_distribution<int> spanDist(3, 6);
-
-    for (int i = 0; i < n; ++i) {
-        auto [col, row] = free[static_cast<std::size_t>(i)];
-        auto axis = (i % 2 == 0) ? ObstacleAxis::HORIZONTAL : ObstacleAxis::VERTICAL;
-        int span  = spanDist(rng);
-        int minP, maxP;
-        if (axis == ObstacleAxis::HORIZONTAL) {
-            minP = std::max(0, col - span);
-            maxP = std::min(m_cfg.gridCols - 1, col + span);
-        } else {
-            minP = std::max(0, row - span);
-            maxP = std::min(m_cfg.gridRows - 1, row + span);
-        }
-        m_dynObs.push_back(
-            std::make_unique<DynamicObstacle>(i, col, row, axis, minP, maxP,
-                                              m_cfg.dynObsSpeed, m_cfg.cellSize));
-    }
+    m_robot->setStartPos({1, 1});
+    m_robot->setGoalPos({m_config.gridCols-5, m_config.gridRows-3});
+    m_statusMessage = "Realistic warehouse loaded.";
 }
 
-// ── Accessors ─────────────────────────────────────────────────────────────────
-const Grid&   SimulationEngine::grid()    const noexcept { return *m_grid;   }
-const Robot&  SimulationEngine::robot()   const noexcept { return *m_robot;  }
-const std::vector<std::unique_ptr<DynamicObstacle>>&
-              SimulationEngine::dynObs()  const noexcept { return m_dynObs;  }
-const Metrics& SimulationEngine::metrics()const noexcept { return m_metrics; }
-SimState       SimulationEngine::state()  const noexcept { return m_state;   }
-const std::string& SimulationEngine::statusMessage() const noexcept { return m_statusMsg; }
-const PathResult&  SimulationEngine::lastPathResult()const noexcept { return m_lastPathResult; }
+void SimulationEngine::generateRandomMap(float density) {
+    std::vector<std::pair<int,int>> protectedCells = {m_robot->pos(), m_robot->goalPos()};
+    m_grid->generateRandom(density, protectedCells);
+    m_dynObs.clear();
+    m_statusMessage = "Random map generated.";
+}
 
-// ── Sensor reading ────────────────────────────────────────────────────────────
-SimulationEngine::SensorReading SimulationEngine::computeSensorReading() const {
+void SimulationEngine::updateSensorData() {
+    float rx = m_robot->col() + 0.5f;
+    float ry = m_robot->row() + 0.5f;
+    m_lastScan = m_sensorProc.perform360Scan(*m_grid, rx, ry, 36);
+}
+
+SimulationEngine::SensorReading SimulationEngine::computeSensorReading() {
     SensorReading sr;
-    sr.seq       = ++m_sensorSeq;
-    auto [col, row] = m_robot->pos();
-
-    // Scan in each direction until obstacle or grid boundary
-    auto scan = [&](int dc, int dr) -> int {
-        for (int d = 1; d < std::max(m_cfg.gridCols, m_cfg.gridRows); ++d) {
-            int nc = col + dc * d, nr = row + dr * d;
-            if (!m_grid->inBounds(nc, nr)) return d;
-            if (m_grid->isObstacle(nc, nr)) return d;
-            // Check dynamic obstacles
-            for (const auto& obs : m_dynObs)
-                if (obs->pos() == std::make_pair(nc, nr)) return d;
-        }
-        return -1;
-    };
-
-    auto [fc, fr] = m_robot->facing();
-    sr.front = scan(fc, fr);
-    sr.rear  = scan(-fc, -fr);
-
-    // Left/right perpendicular to facing
-    sr.left  = scan(-fr,  fc);
-    sr.right = scan( fr, -fc);
-
-    sr.obstacleDetected = (sr.front >= 0 && sr.front <= 3) ||
-                          (sr.rear  >= 0 && sr.rear  <= 3) ||
-                          (sr.left  >= 0 && sr.left  <= 3) ||
-                          (sr.right >= 0 && sr.right <= 3);
+    m_sensorProc.getDirectionalDistances(*m_grid, m_robot->col(), m_robot->row(), sr.front, sr.rear, sr.left, sr.right);
+    sr.seq = ++m_sensorSeq;
+    
+    sr.obstacleDetected = false;
+    if ((sr.front > 0 && sr.front <= 3) ||
+        (sr.rear > 0 && sr.rear <= 3) ||
+        (sr.left > 0 && sr.left <= 3) ||
+        (sr.right > 0 && sr.right <= 3)) {
+        sr.obstacleDetected = true;
+    }
+    
+    // Check dynamic obstacles for interference
+    for (const auto& o : m_dynObs) {
+        int dx = std::abs(o->pos().first - m_robot->col());
+        int dy = std::abs(o->pos().second - m_robot->row());
+        if (dx + dy <= 3) sr.obstacleDetected = true;
+    }
     return sr;
 }
 
-}  // namespace warehouse
+} // namespace warehouse

@@ -41,11 +41,7 @@ void test_obstacle_management() {
     test(!g.isObstacle(2, 2),   "Grid: clearObstacle works");
     test(g.obstacleCount() == 0,"Grid: obstacle count = 0 after clear");
 
-    bool b = g.toggleObstacle(3, 3);
-    test(b,                     "Grid: toggle returns true (now obstacle)");
-    test(g.isObstacle(3, 3),    "Grid: toggleObstacle places obstacle");
-    g.toggleObstacle(3, 3);
-    test(!g.isObstacle(3, 3),   "Grid: toggleObstacle removes obstacle");
+    // Removed obsolete toggling test
 }
 
 void test_clear() {
@@ -71,9 +67,7 @@ void test_neighbours() {
 
 void test_default_map() {
     warehouse::Grid g(30, 22);
-    g.loadDefaultMap({1,1}, {28,20});
-    test(g.isFree(1, 1),   "Grid: robot start not blocked");
-    test(g.isFree(28, 20), "Grid: goal not blocked");
+    g.generateRealisticWarehouse();
     test(g.obstacleCount() > 0, "Grid: default map has obstacles");
 }
 

@@ -1,138 +1,167 @@
-// Grid.cpp - 2D warehouse grid implementation.
 #include "core/Grid.hpp"
-#include <stdexcept>
-#include <random>
 #include <algorithm>
+#include <random>
+#include <chrono>
 
 namespace warehouse {
 
-Grid::Grid(int cols, int rows)
-    : m_cols(cols), m_rows(rows),
-      m_cells(static_cast<std::size_t>(cols * rows))
-{
-    if (cols <= 0 || rows <= 0)
-        throw std::invalid_argument("Grid dimensions must be positive");
-    // Initialize all cells
-    for (int r = 0; r < rows; ++r)
-        for (int c = 0; c < cols; ++c)
-            m_cells[static_cast<std::size_t>(idx(c, r))] = Cell(c, r);
+Grid::Grid(int cols, int rows) : m_cols(cols), m_rows(rows) {
+    m_cells.resize(cols * rows);
+    m_objects.resize(cols * rows, nullptr);
 }
 
-bool Grid::inBounds(int col, int row) const noexcept {
-    return col >= 0 && col < m_cols && row >= 0 && row < m_rows;
+bool Grid::inBounds(int c, int r) const {
+    return c >= 0 && c < m_cols && r >= 0 && r < m_rows;
 }
 
-const Cell& Grid::at(int col, int row) const {
-    if (!inBounds(col, row))
-        throw std::out_of_range("Grid::at out of bounds");
-    return m_cells[static_cast<std::size_t>(idx(col, row))];
+Cell& Grid::getCell(int c, int r) {
+    return m_cells[idx(c, r)];
 }
 
-Cell& Grid::at(int col, int row) {
-    if (!inBounds(col, row))
-        throw std::out_of_range("Grid::at out of bounds");
-    return m_cells[static_cast<std::size_t>(idx(col, row))];
+const Cell& Grid::getCell(int c, int r) const {
+    return m_cells[idx(c, r)];
 }
 
-bool Grid::isObstacle(int col, int row) const noexcept {
-    if (!inBounds(col, row)) return true;   // Out-of-bounds = wall
-    return m_cells[static_cast<std::size_t>(idx(col, row))].isObstacle();
+bool Grid::isFree(int c, int r) const {
+    if (!inBounds(c, r)) return false;
+    int i = idx(c, r);
+    return m_cells[i].type == CellType::FREE || 
+           m_cells[i].type == CellType::LOADING_ZONE || 
+           m_cells[i].type == CellType::CHARGING_STATION ||
+           m_cells[i].type == CellType::PICKUP_STATION;
 }
 
-bool Grid::isFree(int col, int row) const noexcept {
-    return !isObstacle(col, row);
+bool Grid::isObstacle(int c, int r) const {
+    if (!inBounds(c, r)) return true;
+    int i = idx(c, r);
+    return m_cells[i].type == CellType::OBSTACLE || 
+           m_cells[i].type == CellType::SHELF || 
+           m_cells[i].occupied;
 }
 
-void Grid::setObstacle(int col, int row, bool value) {
-    if (!inBounds(col, row)) return;
-    m_cells[static_cast<std::size_t>(idx(col, row))].type =
-        value ? CellType::OBSTACLE : CellType::FREE;
+void Grid::setObstacle(int c, int r, bool isObs) {
+    if (!inBounds(c, r)) return;
+    int i = idx(c, r);
+    if (isObs) {
+        m_cells[i].type = CellType::OBSTACLE;
+        m_objects[i] = nullptr;
+    } else {
+        if (m_cells[i].type == CellType::OBSTACLE) {
+            m_cells[i].type = CellType::FREE;
+        }
+    }
 }
 
-bool Grid::toggleObstacle(int col, int row) {
-    if (!inBounds(col, row)) return false;
-    auto& cell = m_cells[static_cast<std::size_t>(idx(col, row))];
-    cell.type = (cell.type == CellType::OBSTACLE) ? CellType::FREE : CellType::OBSTACLE;
-    return cell.isObstacle();
+void Grid::placeObject(std::shared_ptr<WarehouseObject> obj) {
+    if (!obj || !inBounds(obj->col, obj->row)) return;
+    int i = idx(obj->col, obj->row);
+    m_objects[i] = obj;
+    m_cells[i].type = obj->getType();
+}
+
+std::shared_ptr<WarehouseObject> Grid::getObjectAt(int c, int r) const {
+    if (!inBounds(c, r)) return nullptr;
+    return m_objects[idx(c, r)];
 }
 
 void Grid::clear() {
-    for (auto& c : m_cells)
-        c.type = CellType::FREE;
+    for (int i = 0; i < m_cols * m_rows; ++i) {
+        m_cells[i] = Cell();
+        m_objects[i] = nullptr;
+    }
 }
 
-void Grid::loadDefaultMap(std::pair<int,int> robotPos, std::pair<int,int> goalPos) {
+void Grid::generateRealisticWarehouse() {
     clear();
-    // Shelf blocks: (col_start, col_end, row) — horizontal shelf rows
-    struct ShelfRow { int c0, c1, row; };
-    static const ShelfRow shelves[] = {
-        {3,7,3},{3,7,4},{10,14,3},{10,14,4},{17,21,3},{17,21,4},{24,28,3},{24,28,4},
-        {3,7,8},{3,7,9},{10,14,8},{10,14,9},{17,21,8},{17,21,9},{24,28,8},{24,28,9},
-        {3,7,13},{3,7,14},{10,14,13},{10,14,14},{17,21,13},{17,21,14},{24,28,13},{24,28,14},
-        {3,7,18},{3,7,19},{10,14,18},{10,14,19},{17,21,18},{17,21,19},
-    };
-    for (auto& s : shelves) {
-        for (int c = s.c0; c <= s.c1; ++c) {
-            if (!inBounds(c, s.row)) continue;
-            if (std::make_pair(c, s.row) == robotPos) continue;
-            if (std::make_pair(c, s.row) == goalPos)  continue;
-            setObstacle(c, s.row);
+    
+    // Top and Bottom Aisle margins
+    int marginX = 4;
+    int marginY = 4;
+    
+    // Place Shelves in blocks
+    int shelfWidth = 6;
+    int shelfHeight = 2;
+    int aisleWidth = 3;
+    int aisleHeight = 3;
+    
+    for (int r = marginY; r < m_rows - marginY - shelfHeight; r += shelfHeight + aisleHeight) {
+        for (int c = marginX; c < m_cols - marginX - shelfWidth; c += shelfWidth + aisleWidth) {
+            for (int sr = 0; sr < shelfHeight; ++sr) {
+                for (int sc = 0; sc < shelfWidth; ++sc) {
+                    placeObject(std::make_shared<Shelf>(c + sc, r + sr, "ShelfBlock"));
+                }
+            }
+        }
+    }
+    
+    // Place Charging Stations on the left wall
+    for (int r = 5; r < m_rows - 5; r += 5) {
+        placeObject(std::make_shared<ChargingStation>(0, r, "Charger_" + std::to_string(r)));
+        placeObject(std::make_shared<ChargingStation>(1, r, "Charger_" + std::to_string(r) + "_B"));
+    }
+    
+    // Place Loading Zones on the bottom right
+    for (int c = m_cols - 12; c < m_cols - 2; ++c) {
+        for (int r = m_rows - 4; r < m_rows - 1; ++r) {
+            placeObject(std::make_shared<LoadingZone>(c, r, "LoadingZone"));
+        }
+    }
+    
+    // Place Pickup Stations on the top right
+    for (int c = m_cols - 12; c < m_cols - 2; ++c) {
+        for (int r = 1; r < 4; ++r) {
+            placeObject(std::make_shared<PickupStation>(c, r, "PickupZone"));
         }
     }
 }
 
-void Grid::generateRandom(float density,
-                           const std::vector<std::pair<int,int>>& protected_cells)
-{
+void Grid::generateRandom(float density, const std::vector<std::pair<int,int>>& protectedCells) {
     clear();
     std::mt19937 rng(std::random_device{}());
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-
+    
     for (int r = 0; r < m_rows; ++r) {
         for (int c = 0; c < m_cols; ++c) {
-            auto pos = std::make_pair(c, r);
-            bool prot = std::find(protected_cells.begin(),
-                                  protected_cells.end(), pos) != protected_cells.end();
-            if (!prot && dist(rng) < density)
-                setObstacle(c, r);
+            bool isProtected = false;
+            for (const auto& p : protectedCells) {
+                if (p.first == c && p.second == r) {
+                    isProtected = true;
+                    break;
+                }
+            }
+            if (!isProtected && dist(rng) < density) {
+                setObstacle(c, r, true);
+            }
         }
     }
 }
 
-int Grid::obstacleCount() const noexcept {
-    int n = 0;
-    for (const auto& c : m_cells)
-        if (c.isObstacle()) ++n;
-    return n;
+std::vector<std::pair<int,int>> Grid::neighbours(int c, int r) const {
+    std::vector<std::pair<int,int>> res;
+    res.reserve(4);
+    if (c > 0 && !isObstacle(c-1, r)) res.emplace_back(c-1, r);
+    if (c < m_cols-1 && !isObstacle(c+1, r)) res.emplace_back(c+1, r);
+    if (r > 0 && !isObstacle(c, r-1)) res.emplace_back(c, r-1);
+    if (r < m_rows-1 && !isObstacle(c, r+1)) res.emplace_back(c, r+1);
+    return res;
 }
 
 std::vector<std::pair<int,int>> Grid::freeCells() const {
-    std::vector<std::pair<int,int>> result;
-    result.reserve(m_cells.size());
-    for (const auto& c : m_cells)
-        if (c.isFree()) result.emplace_back(c.col, c.row);
-    return result;
-}
-
-std::vector<std::pair<int,int>>
-Grid::neighbours(int col, int row, bool diagonal) const {
-    static const int dx4[] = {0, 0, -1, 1};
-    static const int dy4[] = {-1, 1, 0, 0};
-    static const int dx8[] = {0, 0,-1, 1,-1, 1,-1, 1};
-    static const int dy8[] = {-1, 1, 0, 0,-1,-1, 1, 1};
-
-    const int* dx = diagonal ? dx8 : dx4;
-    const int* dy = diagonal ? dy8 : dy4;
-    int n = diagonal ? 8 : 4;
-
-    std::vector<std::pair<int,int>> result;
-    result.reserve(static_cast<std::size_t>(n));
-    for (int i = 0; i < n; ++i) {
-        int nc = col + dx[i], nr = row + dy[i];
-        if (inBounds(nc, nr) && isFree(nc, nr))
-            result.emplace_back(nc, nr);
+    std::vector<std::pair<int,int>> res;
+    for (int r = 0; r < m_rows; ++r) {
+        for (int c = 0; c < m_cols; ++c) {
+            if (isFree(c, r)) res.emplace_back(c, r);
+        }
     }
-    return result;
+    return res;
 }
 
-}  // namespace warehouse
+int Grid::obstacleCount() const {
+    int count = 0;
+    for (const auto& cell : m_cells) {
+        if (cell.type == CellType::OBSTACLE || cell.type == CellType::SHELF) count++;
+    }
+    return count;
+}
+
+} // namespace warehouse

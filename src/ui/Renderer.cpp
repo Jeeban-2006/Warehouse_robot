@@ -1,389 +1,155 @@
-// Renderer.cpp - SDL2 warehouse rendering implementation.
 #include "ui/Renderer.hpp"
-#include "core/SimulationEngine.hpp"
-#include "core/Robot.hpp"
-
 #include <cmath>
-#include <string>
-#include <sstream>
-#include <iomanip>
 
 namespace warehouse {
 
-Renderer::Renderer(SDL_Renderer* r, SDL_Rect gridRect, int cellSize,
+Renderer::Renderer(SDL_Renderer* renderer, SDL_Rect gridRect, int cellSize,
                    TTF_Font* fontLg, TTF_Font* fontMd, TTF_Font* fontSm)
-    : m_renderer(r), m_gridRect(gridRect), m_cellSize(cellSize),
-      m_fontLg(fontLg), m_fontMd(fontMd), m_fontSm(fontSm)
-{}
+    : m_ren(renderer), m_gridRect(gridRect), m_cellSize(cellSize),
+      m_fontLg(fontLg), m_fontMd(fontMd), m_fontSm(fontSm) {}
 
-// ── Primitive helpers ─────────────────────────────────────────────────────────
-void Renderer::setColor(Color c) {
-    SDL_SetRenderDrawColor(m_renderer, c.r, c.g, c.b, c.a);
-}
-
-void Renderer::drawFilledRect(int x, int y, int w, int h) {
-    SDL_Rect r{x, y, w, h};
-    SDL_RenderFillRect(m_renderer, &r);
-}
-
-void Renderer::drawRect(int x, int y, int w, int h) {
-    SDL_Rect r{x, y, w, h};
-    SDL_RenderDrawRect(m_renderer, &r);
-}
-
-void Renderer::drawLine(int x1, int y1, int x2, int y2) {
-    SDL_RenderDrawLine(m_renderer, x1, y1, x2, y2);
-}
-
-void Renderer::drawCircle(int cx, int cy, int r) {
-    // Midpoint circle algorithm
-    int x = r, y = 0, err = 0;
-    while (x >= y) {
-        SDL_RenderDrawPoint(m_renderer, cx+x, cy+y);
-        SDL_RenderDrawPoint(m_renderer, cx+y, cy+x);
-        SDL_RenderDrawPoint(m_renderer, cx-y, cy+x);
-        SDL_RenderDrawPoint(m_renderer, cx-x, cy+y);
-        SDL_RenderDrawPoint(m_renderer, cx-x, cy-y);
-        SDL_RenderDrawPoint(m_renderer, cx-y, cy-x);
-        SDL_RenderDrawPoint(m_renderer, cx+y, cy-x);
-        SDL_RenderDrawPoint(m_renderer, cx+x, cy-y);
-        if (err <= 0) { ++y; err += 2*y+1; }
-        else          { --x; err -= 2*x+1; }
-    }
-}
-
-void Renderer::drawFilledCircle(int cx, int cy, int r) {
-    for (int dy = -r; dy <= r; ++dy) {
-        int dx = static_cast<int>(std::sqrt(static_cast<double>(r*r - dy*dy)));
-        SDL_RenderDrawLine(m_renderer, cx-dx, cy+dy, cx+dx, cy+dy);
-    }
-}
-
-void Renderer::drawText(const std::string& text, TTF_Font* font, Color c, int x, int y) {
-    if (!font || text.empty()) return;
-    SDL_Surface* surf = TTF_RenderText_Blended(font, text.c_str(), c.sdl());
-    if (!surf) return;
-    SDL_Texture* tex = SDL_CreateTextureFromSurface(m_renderer, surf);
-    if (tex) {
-        SDL_Rect dst{x, y, surf->w, surf->h};
-        SDL_RenderCopy(m_renderer, tex, nullptr, &dst);
-        SDL_DestroyTexture(tex);
-    }
-    SDL_FreeSurface(surf);
-}
-
-void Renderer::drawTextCentered(const std::string& text, TTF_Font* font, Color c, int cx, int y) {
-    if (!font || text.empty()) return;
-    int w = 0, h = 0;
-    TTF_SizeText(font, text.c_str(), &w, &h);
-    drawText(text, font, c, cx - w/2, y);
-}
-
-// ── Top-level render ──────────────────────────────────────────────────────────
 void Renderer::render(const SimulationEngine& sim, float pulseT, float dt) {
-    (void)dt;
-    // Clear with background color
-    setColor(Colors::BG);
-    SDL_RenderClear(m_renderer);
+    // Clear screen
+    SDL_SetRenderDrawColor(m_ren, Colors::BG.r, Colors::BG.g, Colors::BG.b, 255);
+    SDL_RenderClear(m_ren);
 
-    drawGridBackground(sim);
-    if (sim.showExplored) drawExploredNodes(sim);
-    if (sim.showPath)     drawPath(sim);
-    drawStaticObstacles(sim);
-    drawGoal(sim, pulseT);
-    drawStart(sim);
-    drawDynamicObstacles(sim);
-    drawRobot(sim);
-    drawReplanBanner(sim);
+    // Draw grid background
+    SDL_SetRenderDrawColor(m_ren, 20, 22, 32, 255);
+    SDL_RenderFillRect(m_ren, &m_gridRect);
 
-    auto st = sim.state();
-    if (st == SimState::COMPLETED) drawCompletedOverlay(sim);
-    if (st == SimState::NO_PATH)   drawNoPathOverlay(sim);
-    if (sim.debugMode)             drawDebugOverlay(sim, 0.0f);
+    drawGrid(sim.grid());
+
+    // Draw explored nodes if enabled
+    if (sim.showExplored) {
+        // Explored nodes not currently exposed in sim natively without tracking it
+        // A* planner could expose it, but skipped for brevity in rendering
+    }
+
+    if (sim.showPath && sim.robot().hasPath()) {
+        drawPath(sim.robot().path(), sim.robot().pathIndex());
+    }
+
+    // Draw goal position
+    auto goal = sim.robot().goalPos();
+    SDL_Rect gRect{m_gridRect.x + goal.first * m_cellSize + 2,
+                   m_gridRect.y + goal.second * m_cellSize + 2,
+                   m_cellSize - 4, m_cellSize - 4};
+    SDL_SetRenderDrawColor(m_ren, Colors::GOAL.r, Colors::GOAL.g, Colors::GOAL.b, 255);
+    SDL_RenderFillRect(m_ren, &gRect);
+
+    if (sim.dynamicObsEnabled) {
+        drawDynamicObstacles(sim.dynObs());
+    }
+
+    drawRobot(sim.robot(), pulseT);
+
+    if (sim.debugMode) {
+        drawLidar(sim.latestLidarScan(), sim.robot().centreX(), sim.robot().centreY());
+    }
 }
 
-// ── Grid background ───────────────────────────────────────────────────────────
-void Renderer::drawGridBackground(const SimulationEngine& sim) {
-    const auto& grid = sim.grid();
-    int ox = m_gridRect.x, oy = m_gridRect.y;
-    int cs = m_cellSize;
+void Renderer::drawGrid(const Grid& grid) {
     for (int r = 0; r < grid.rows(); ++r) {
         for (int c = 0; c < grid.cols(); ++c) {
-            int rx = ox + c*cs, ry = oy + r*cs;
-            setColor(Colors::CELL_FREE);
-            drawFilledRect(rx, ry, cs, cs);
-            setColor(Colors::CELL_GRID);
-            drawRect(rx, ry, cs, cs);
+            SDL_Rect cellRect{m_gridRect.x + c * m_cellSize, m_gridRect.y + r * m_cellSize, m_cellSize, m_cellSize};
+            
+            auto type = grid.getCell(c, r).type;
+            Color col = Colors::CELL_FREE;
+            
+            switch (type) {
+                case CellType::OBSTACLE: col = Colors::CELL_OBSTACLE; break;
+                case CellType::SHELF: col = Colors::SHELF; break;
+                case CellType::CHARGING_STATION: col = Colors::CHARGING_STATION; break;
+                case CellType::LOADING_ZONE: col = Colors::LOADING_ZONE; break;
+                case CellType::PICKUP_STATION: col = Colors::PICKUP_STATION; break;
+                default: col = Colors::CELL_FREE; break;
+            }
+
+            SDL_SetRenderDrawColor(m_ren, col.r, col.g, col.b, col.a);
+            SDL_RenderFillRect(m_ren, &cellRect);
+
+            // Draw grid lines
+            SDL_SetRenderDrawColor(m_ren, 35, 40, 55, 255);
+            SDL_RenderDrawRect(m_ren, &cellRect);
         }
     }
 }
 
-// ── Explored nodes ────────────────────────────────────────────────────────────
-void Renderer::drawExploredNodes(const SimulationEngine& sim) {
-    const auto& result = sim.lastPathResult();
-    int ox = m_gridRect.x, oy = m_gridRect.y;
-    int cs = m_cellSize;
-    SDL_SetRenderDrawBlendMode(m_renderer, SDL_BLENDMODE_BLEND);
-    setColor({Colors::PATH_EXP.r, Colors::PATH_EXP.g, Colors::PATH_EXP.b, 80});
-    for (const auto& [c, r] : result.explored) {
-        drawFilledRect(ox+c*cs, oy+r*cs, cs, cs);
+void Renderer::drawPath(const std::vector<std::pair<int,int>>& path, size_t currentIndex) {
+    if (path.size() < 2) return;
+    SDL_SetRenderDrawColor(m_ren, Colors::PATH_LINE.r, Colors::PATH_LINE.g, Colors::PATH_LINE.b, Colors::PATH_LINE.a);
+    
+    for (size_t i = currentIndex; i < path.size() - 1; ++i) {
+        int x1 = m_gridRect.x + path[i].first * m_cellSize + m_cellSize / 2;
+        int y1 = m_gridRect.y + path[i].second * m_cellSize + m_cellSize / 2;
+        int x2 = m_gridRect.x + path[i+1].first * m_cellSize + m_cellSize / 2;
+        int y2 = m_gridRect.y + path[i+1].second * m_cellSize + m_cellSize / 2;
+        SDL_RenderDrawLine(m_ren, x1, y1, x2, y2);
     }
-    SDL_SetRenderDrawBlendMode(m_renderer, SDL_BLENDMODE_NONE);
 }
 
-// ── Path ─────────────────────────────────────────────────────────────────────
-void Renderer::drawPath(const SimulationEngine& sim) {
-    const auto& robot = sim.robot();
-    if (!robot.hasPath()) return;
-    const auto& path = robot.path();
-    int ox = m_gridRect.x, oy = m_gridRect.y;
-    int cs = m_cellSize;
-    int n = static_cast<int>(path.size());
+void Renderer::drawRobot(const Robot& robot, float pulseT) {
+    int rx = m_gridRect.x + static_cast<int>(robot.centreX()) - m_cellSize / 2;
+    int ry = m_gridRect.y + static_cast<int>(robot.centreY()) - m_cellSize / 2;
 
-    // Draw path dots
-    for (int i = 1; i < n; ++i) {
-        auto [c, r] = path[static_cast<std::size_t>(i)];
-        float t = (n > 1) ? 0.4f + 0.6f * (float(i) / float(n-1)) : 1.0f;
-        Color col{
-            static_cast<Uint8>(Colors::PATH.r * t),
-            static_cast<Uint8>(Colors::PATH.g * t),
-            static_cast<Uint8>(Colors::PATH.b * t)
-        };
-        setColor(col);
-        int px = ox + c*cs + cs/4, py = oy + r*cs + cs/4;
-        drawFilledRect(px, py, cs/2, cs/2);
+    SDL_Rect rRect{rx + 2, ry + 2, m_cellSize - 4, m_cellSize - 4};
+    
+    Color rCol = Colors::ROBOT;
+    if (robot.state() == RobotState::ERROR || robot.state() == RobotState::BLOCKED) rCol = Colors::ROBOT_ERROR;
+    if (robot.state() == RobotState::CHARGING) rCol = Colors::ROBOT_CHARGE;
+    if (robot.state() == RobotState::PICKING || robot.state() == RobotState::DELIVERING) {
+        rCol.r = 255; rCol.g = 150; rCol.b = 0; // Orange for task execution
     }
 
-    // Draw line connecting path cells
-    if (n > 1) {
-        setColor({Colors::PATH.r, Colors::PATH.g, Colors::PATH.b, 160});
-        for (int i = 0; i < n-1; ++i) {
-            auto [c1,r1] = path[static_cast<std::size_t>(i)];
-            auto [c2,r2] = path[static_cast<std::size_t>(i+1)];
-            drawLine(ox+c1*cs+cs/2, oy+r1*cs+cs/2,
-                     ox+c2*cs+cs/2, oy+r2*cs+cs/2);
+    SDL_SetRenderDrawColor(m_ren, rCol.r, rCol.g, rCol.b, 255);
+    SDL_RenderFillRect(m_ren, &rRect);
+
+    // Pulse effect
+    if (robot.state() == RobotState::MOVING) {
+        int pSize = static_cast<int>((std::sin(pulseT * 10.0f) * 0.5f + 0.5f) * 4.0f);
+        SDL_Rect pulseRect{rx - pSize, ry - pSize, m_cellSize + pSize * 2, m_cellSize + pSize * 2};
+        SDL_SetRenderDrawColor(m_ren, rCol.r, rCol.g, rCol.b, 100);
+        SDL_RenderDrawRect(m_ren, &pulseRect);
+    }
+    
+    // Battery indicator
+    int batH = static_cast<int>((robot.batteryPercentage() / 100.0f) * (m_cellSize - 4));
+    SDL_Rect batRect{rx + m_cellSize - 6, ry + 2 + ((m_cellSize-4)-batH), 4, batH};
+    if (robot.batteryPercentage() > 50) SDL_SetRenderDrawColor(m_ren, 0, 255, 0, 255);
+    else if (robot.batteryPercentage() > 20) SDL_SetRenderDrawColor(m_ren, 255, 255, 0, 255);
+    else SDL_SetRenderDrawColor(m_ren, 255, 0, 0, 255);
+    SDL_RenderFillRect(m_ren, &batRect);
+}
+
+void Renderer::drawDynamicObstacles(const std::vector<std::unique_ptr<DynamicObstacle>>& dynObs) {
+    for (const auto& o : dynObs) {
+        int ox = m_gridRect.x + static_cast<int>(o->pixelX()) - m_cellSize / 2;
+        int oy = m_gridRect.y + static_cast<int>(o->pixelY()) - m_cellSize / 2;
+        SDL_Rect oRect{ox + 2, oy + 2, m_cellSize - 4, m_cellSize - 4};
+        SDL_SetRenderDrawColor(m_ren, Colors::DYN_OBS.r, Colors::DYN_OBS.g, Colors::DYN_OBS.b, 255);
+        SDL_RenderFillRect(m_ren, &oRect);
+    }
+}
+
+void Renderer::drawLidar(const LidarScan& scan, float rx, float ry) {
+    int startX = m_gridRect.x + static_cast<int>(rx);
+    int startY = m_gridRect.y + static_cast<int>(ry);
+    
+    SDL_SetRenderDrawColor(m_ren, Colors::LIDAR_RAY.r, Colors::LIDAR_RAY.g, Colors::LIDAR_RAY.b, Colors::LIDAR_RAY.a);
+    
+    for (const auto& ray : scan.rays) {
+        float rad = ray.angleDeg * (M_PI / 180.0f);
+        int endX = startX + static_cast<int>(std::cos(rad) * ray.distance * m_cellSize);
+        int endY = startY + static_cast<int>(std::sin(rad) * ray.distance * m_cellSize);
+        SDL_RenderDrawLine(m_ren, startX, startY, endX, endY);
+        
+        if (ray.hitObstacle) {
+            SDL_Rect hitRect{endX - 2, endY - 2, 4, 4};
+            SDL_SetRenderDrawColor(m_ren, 255, 255, 0, 255);
+            SDL_RenderFillRect(m_ren, &hitRect);
+            SDL_SetRenderDrawColor(m_ren, Colors::LIDAR_RAY.r, Colors::LIDAR_RAY.g, Colors::LIDAR_RAY.b, Colors::LIDAR_RAY.a);
         }
     }
 }
 
-// ── Static obstacles ──────────────────────────────────────────────────────────
-void Renderer::drawStaticObstacles(const SimulationEngine& sim) {
-    const auto& grid = sim.grid();
-    int ox = m_gridRect.x, oy = m_gridRect.y;
-    int cs = m_cellSize;
-    for (int r = 0; r < grid.rows(); ++r) {
-        for (int c = 0; c < grid.cols(); ++c) {
-            if (!grid.isObstacle(c, r)) continue;
-            int rx = ox+c*cs, ry = oy+r*cs;
-            setColor(Colors::OBSTACLE);
-            drawFilledRect(rx, ry, cs, cs);
-            setColor(Colors::OBSTACLE_TOP);
-            drawLine(rx, ry, rx+cs-1, ry);
-            drawLine(rx, ry, rx, ry+cs-1);
-            setColor({50,55,75});
-            drawLine(rx, ry+cs-1, rx+cs-1, ry+cs-1);
-            drawLine(rx+cs-1, ry, rx+cs-1, ry+cs-1);
-        }
-    }
-}
-
-// ── Goal ─────────────────────────────────────────────────────────────────────
-void Renderer::drawGoal(const SimulationEngine& sim, float pulseT) {
-    auto [gc, gr] = sim.robot().goalPos();
-    int ox = m_gridRect.x, oy = m_gridRect.y;
-    int cs = m_cellSize;
-    int cx = ox + gc*cs + cs/2;
-    int cy = oy + gr*cs + cs/2;
-    int r  = cs/2 - 3;
-
-    // Pulse ring
-    float pulse = std::abs(std::sin(pulseT * 2.5f));
-    int   pr    = r + static_cast<int>(pulse * 5);
-    SDL_SetRenderDrawBlendMode(m_renderer, SDL_BLENDMODE_BLEND);
-    setColor({Colors::GOAL.r, Colors::GOAL.g, Colors::GOAL.b,
-              static_cast<Uint8>(60 + pulse * 80)});
-    drawFilledCircle(cx, cy, pr);
-    SDL_SetRenderDrawBlendMode(m_renderer, SDL_BLENDMODE_NONE);
-
-    setColor(Colors::GOAL);
-    drawFilledCircle(cx, cy, r);
-    setColor(Colors::GOAL_OUT);
-    drawCircle(cx, cy, r);
-
-    drawTextCentered("G", m_fontSm, {30,20,0}, cx, cy - 7);
-}
-
-// ── Start marker ──────────────────────────────────────────────────────────────
-void Renderer::drawStart(const SimulationEngine& sim) {
-    auto [sc, sr] = sim.robot().startPos();
-    if (std::make_pair(sc,sr) == sim.robot().pos()) return;
-    int ox = m_gridRect.x, oy = m_gridRect.y;
-    int cs = m_cellSize;
-    int cx = ox + sc*cs + cs/2, cy = oy + sr*cs + cs/2;
-    int r  = cs/2 - 4;
-    setColor(Colors::START);
-    drawFilledCircle(cx, cy, r);
-    setColor({30,160,120});
-    drawCircle(cx, cy, r);
-    drawTextCentered("S", m_fontSm, {0,40,30}, cx, cy-7);
-}
-
-// ── Dynamic obstacles ─────────────────────────────────────────────────────────
-void Renderer::drawDynamicObstacles(const SimulationEngine& sim) {
-    int ox = m_gridRect.x, oy = m_gridRect.y;
-    int cs = m_cellSize;
-    for (const auto& obs : sim.dynObs()) {
-        int cx = ox + static_cast<int>(obs->pixelX());
-        int cy = oy + static_cast<int>(obs->pixelY());
-        int r  = cs/2 - 2;
-        setColor(Colors::DYN_OBS);
-        drawFilledCircle(cx, cy, r);
-        setColor(Colors::DYN_OBS_OUT);
-        drawCircle(cx, cy, r);
-        drawTextCentered("D", m_fontSm, {255,220,220}, cx, cy-7);
-    }
-}
-
-// ── Robot ─────────────────────────────────────────────────────────────────────
-void Renderer::drawRobot(const SimulationEngine& sim) {
-    const auto& robot = sim.robot();
-    int ox = m_gridRect.x, oy = m_gridRect.y;
-    int cs = m_cellSize;
-    int cx = ox + static_cast<int>(robot.pixelX());
-    int cy = oy + static_cast<int>(robot.pixelY());
-    int r  = cs/2 - 3;
-
-    // Body color based on state
-    Color bodyCol = Colors::ROBOT;
-    switch(robot.state()) {
-        case RobotState::PAUSED:       bodyCol = {100,180,140}; break;
-        case RobotState::ERROR:        bodyCol = {200, 80, 80}; break;
-        case RobotState::BLOCKED:      bodyCol = {200,150, 50}; break;
-        case RobotState::REACHED_GOAL: bodyCol = {100,220,160}; break;
-        default: break;
-    }
-    setColor(bodyCol);
-    drawFilledCircle(cx, cy, r);
-    setColor(Colors::ROBOT_OUT);
-    drawCircle(cx, cy, r);
-
-    // Eyes
-    auto [dc, dr] = robot.facing();
-    int eo = r/3;
-    int ex = cx + dc*eo, ey = cy + dr*eo;
-    setColor({240,240,240});
-    drawFilledCircle(ex + (-dr)*3, ey + dc*3, 2);
-    drawFilledCircle(ex + dr*3,    ey + (-dc)*3, 2);
-
-    // State dot
-    Color dotCol = Colors::TEXT_DIM;
-    switch(robot.state()) {
-        case RobotState::MOVING:       dotCol = Colors::SUCCESS; break;
-        case RobotState::PAUSED:       dotCol = Colors::WARNING; break;
-        case RobotState::PLANNING:     dotCol = Colors::ACCENT;  break;
-        case RobotState::REACHED_GOAL: dotCol = Colors::SUCCESS; break;
-        case RobotState::ERROR:        dotCol = Colors::ERROR;   break;
-        default: break;
-    }
-    setColor(dotCol);
-    drawFilledCircle(cx+r-4, cy-r+4, 4);
-}
-
-// ── Overlays ──────────────────────────────────────────────────────────────────
-void Renderer::drawCompletedOverlay(const SimulationEngine& sim) {
-    // Semi-transparent overlay
-    SDL_SetRenderDrawBlendMode(m_renderer, SDL_BLENDMODE_BLEND);
-    setColor({0,0,0,60});
-    SDL_RenderFillRect(m_renderer, &m_gridRect);
-    SDL_SetRenderDrawBlendMode(m_renderer, SDL_BLENDMODE_NONE);
-
-    const auto& met = sim.metrics();
-    int cw = 340, ch = 200;
-    int cx = m_gridRect.x + m_gridRect.w/2;
-    int cy = m_gridRect.y + m_gridRect.h/2;
-    int rx = cx - cw/2, ry = cy - ch/2;
-
-    setColor({20,30,25});
-    drawFilledRect(rx, ry, cw, ch);
-    setColor(Colors::SUCCESS);
-    drawRect(rx, ry, cw, ch);
-
-    int ty = ry + 10;
-    drawTextCentered("SIMULATION COMPLETE", m_fontMd, Colors::SUCCESS, cx, ty); ty += 30;
-    drawTextCentered("Path: " + std::to_string(met.lastPathLength) + " cells",
-                     m_fontSm, Colors::TEXT, cx, ty); ty += 22;
-    drawTextCentered("Nodes explored: " + std::to_string(met.lastNodesExplored),
-                     m_fontSm, Colors::TEXT, cx, ty); ty += 22;
-    drawTextCentered("Replans: " + std::to_string(met.replanCount),
-                     m_fontSm, Colors::WARNING, cx, ty); ty += 22;
-    std::ostringstream oss;
-    oss << std::fixed << std::setprecision(1) << met.elapsedSeconds;
-    drawTextCentered("Time: " + oss.str() + "s",
-                     m_fontSm, Colors::TEXT, cx, ty); ty += 22;
-    drawTextCentered("Press R to restart", m_fontSm, Colors::TEXT_DIM, cx, ty);
-}
-
-void Renderer::drawNoPathOverlay(const SimulationEngine& sim) {
-    int cx = m_gridRect.x + m_gridRect.w/2;
-    int ty = m_gridRect.y + 20;
-
-    SDL_SetRenderDrawBlendMode(m_renderer, SDL_BLENDMODE_BLEND);
-    setColor({40,20,20,200});
-    drawFilledRect(cx-210, ty-8, 420, 55);
-    SDL_SetRenderDrawBlendMode(m_renderer, SDL_BLENDMODE_NONE);
-    setColor(Colors::ERROR);
-    drawRect(cx-210, ty-8, 420, 55);
-
-    drawTextCentered("NO VALID PATH FOUND", m_fontMd, Colors::ERROR, cx, ty);
-    drawTextCentered("Remove obstacles then press F or SPACE",
-                     m_fontSm, Colors::TEXT_DIM, cx, ty+25);
-    (void)sim;
-}
-
-void Renderer::drawReplanBanner(const SimulationEngine& sim) {
-    if (!sim.replanningBanner()) return;
-    int cx = m_gridRect.x + m_gridRect.w/2;
-    int ty = m_gridRect.y + m_gridRect.h - 50;
-
-    SDL_SetRenderDrawBlendMode(m_renderer, SDL_BLENDMODE_BLEND);
-    setColor({200,60,60,200});
-    drawFilledRect(cx-150, ty-6, 300, 30);
-    SDL_SetRenderDrawBlendMode(m_renderer, SDL_BLENDMODE_NONE);
-    drawTextCentered("REPLANNING PATH...", m_fontMd, Colors::TEXT_BRIGHT, cx, ty);
-}
-
-void Renderer::drawDebugOverlay(const SimulationEngine& sim, float fps) {
-    const auto& robot = sim.robot();
-    const auto& met   = sim.metrics();
-    int sx = m_gridRect.x + 4;
-    int sy = m_gridRect.y + 4;
-
-    auto line = [&](const std::string& s) {
-        SDL_SetRenderDrawBlendMode(m_renderer, SDL_BLENDMODE_BLEND);
-        int tw = 0, th = 0;
-        if (m_fontSm) TTF_SizeText(m_fontSm, s.c_str(), &tw, &th);
-        setColor({0,0,0,140});
-        drawFilledRect(sx-2, sy, tw+6, th);
-        SDL_SetRenderDrawBlendMode(m_renderer, SDL_BLENDMODE_NONE);
-        drawText(s, m_fontSm, {200,255,200}, sx, sy);
-        sy += 15;
-    };
-
-    std::ostringstream oss;
-    oss << std::fixed << std::setprecision(1);
-    line("FPS: " + (fps > 0 ? (oss.str(), std::to_string(static_cast<int>(fps))) : "?"));
-    line("State: " + std::string(simStateStr(sim.state())));
-    line("Robot: (" + std::to_string(robot.col()) + "," + std::to_string(robot.row()) + ")");
-    line("RobotState: " + std::string(robotStateStr(robot.state())));
-    line("PathIdx: " + std::to_string(robot.pathIndex()) + "/" +
-         std::to_string(robot.path().size()));
-    line("PathCalls: " + std::to_string(met.totalPathCalls));
-    line("Replans: " + std::to_string(met.replanCount));
-    line("PlanMs: " + [&]{
-        std::ostringstream o; o << std::fixed << std::setprecision(2) << met.lastPlanTimeMs;
-        return o.str();
-    }());
-    line("Speed: " + std::to_string(static_cast<int>(sim.speedMultiplier * 10)/10) + "x");
-}
-
-}  // namespace warehouse
+} // namespace warehouse

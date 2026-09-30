@@ -50,6 +50,7 @@ add_library(warehouse_core STATIC
     src/core/DynamicObstacle.cpp
     src/core/SimulationEngine.cpp
     src/core/Metrics.cpp
+    src/core/SensorProcessing.cpp
 )
 target_include_directories(warehouse_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_compile_features(warehouse_core PUBLIC cxx_std_17)
