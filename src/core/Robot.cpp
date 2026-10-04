@@ -130,11 +130,16 @@ void Robot::update(float dt, float speedMultiplier) {
         return;
     }
 
+    if (m_state == RobotState::ERROR) return;
     if (m_state != RobotState::MOVING) return;
     if (m_path.empty() || m_pathIndex >= m_path.size()) return;
 
-    // Movement drains battery slowly
+    // Movement drains battery (Lowered to allow full warehouse traversal)
     drainBattery(dt * 0.5f);
+    if (m_battery <= 0.0f) {
+        m_state = RobotState::ERROR;
+        return;
+    }
 
     float actualSpeed = m_speed * speedMultiplier;
     m_progress += actualSpeed * dt;
@@ -148,21 +153,6 @@ void Robot::update(float dt, float speedMultiplier) {
         if (m_pathIndex >= m_path.size()) {
             m_progress = 0.0f;
             m_state = RobotState::REACHED_GOAL;
-            
-            // Task state machine logic
-            if (m_currentTask) {
-                if (m_currentTask->status == TaskStatus::ASSIGNED) {
-                    m_state = RobotState::PICKING;
-                    m_currentTask->status = TaskStatus::PICKING;
-                } else if (m_currentTask->status == TaskStatus::PICKING) {
-                    m_state = RobotState::DELIVERING;
-                    m_currentTask->status = TaskStatus::DELIVERING;
-                } else if (m_currentTask->status == TaskStatus::DELIVERING) {
-                    m_currentTask->status = TaskStatus::COMPLETED;
-                    m_state = RobotState::IDLE;
-                    m_currentTask = nullptr;
-                }
-            }
         }
     }
 }

@@ -56,6 +56,7 @@ public:
     bool needsCharging() const { return m_battery < 20.0f; }
 
     void assignTask(std::shared_ptr<Task> task);
+    void clearTask() { m_currentTask = nullptr; }
     std::shared_ptr<Task> currentTask() const { return m_currentTask; }
 
     void update(float dt, float speedMultiplier = 1.0f);

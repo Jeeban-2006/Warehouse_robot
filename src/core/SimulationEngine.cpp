@@ -74,15 +74,52 @@ void SimulationEngine::update(float dt) {
     // LiDAR & Sensors
     updateSensorData();
 
-    // Check battery state
-    if (m_robot->needsCharging() && m_robot->state() != RobotState::CHARGING && m_robot->state() != RobotState::IDLE) {
-        // Simple logic to find a charging station (just one specific pos for demo)
-        setRobotGoal(1, 5); // Usually where chargers are placed in realistic map
-        triggerReplan();
-        m_statusMessage = "LOW BATTERY! Routing to charger.";
+    // Check death
+    if (m_robot->state() == RobotState::ERROR) {
+        m_statusMessage = "CRITICAL: BATTERY 0%. SYSTEM DEAD.";
+        m_state = SimState::PAUSED;
+        return;
     }
 
-    // Robot state execution
+    // Smart Battery Management System (BMS)
+    bool needsEmergencyCharge = false;
+    std::pair<int,int> nearestCharger = findNearestCharger();
+
+    if (m_robot->state() != RobotState::CHARGING && m_robot->state() != RobotState::IDLE) {
+        float battery = m_robot->batteryPercentage();
+        // 1. Hard minimum limit
+        if (battery < 15.0f) {
+            needsEmergencyCharge = true;
+        } 
+        // 2. Predictive BMS based on A* distance
+        else if (m_robot->hasPath()) {
+            // Distance to complete current goal
+            float distToGoal = (float)(m_robot->path().size() - m_robot->pathIndex());
+            // Distance from goal to the nearest charger
+            float distFromGoalToCharger = std::abs(m_robot->goalPos().first - nearestCharger.first) + 
+                                          std::abs(m_robot->goalPos().second - nearestCharger.second);
+            
+            // Movement uses ~0.15% battery per grid cell
+            float batteryNeeded = (distToGoal + distFromGoalToCharger) * 0.15f;
+            
+            // If we don't have enough to finish task AND reach charger (plus 5% safety buffer)
+            if (battery < batteryNeeded + 5.0f) {
+                needsEmergencyCharge = true;
+            }
+        }
+
+        if (needsEmergencyCharge && m_robot->goalPos() != nearestCharger) {
+            setRobotGoal(nearestCharger.first, nearestCharger.second);
+            triggerReplan();
+            m_statusMessage = "BMS PREDICTION: Low battery for mission. Routing to nearest charger!";
+        }
+    }
+
+    if (m_pauseTimer > 0.0f) {
+        m_pauseTimer -= (dt * speedMultiplier);
+        return; // Pause the robot logic, but dynamic obstacles and sensors still run
+    }
+
     m_robot->update(dt, speedMultiplier);
 
     // Replanning based on interval or path blockage
@@ -98,12 +135,83 @@ void SimulationEngine::update(float dt) {
         if (!m_planner->isPathValid(m_robot->path(), extra)) {
             m_metrics.replanCount++;
             triggerReplan();
+            m_statusMessage = "Path blocked by obstacle! Replanning...";
+        }
+    } else if (!m_robot->hasPath() && m_robot->state() == RobotState::IDLE) {
+        // Deadlock fix: If robot has no path but should be doing a task or charging
+        if (m_robot->needsCharging() || m_robot->currentTask() != nullptr) {
+            if (m_replanTimer >= m_config.replanInterval) {
+                m_replanTimer = 0.0f;
+                triggerReplan();
+                m_statusMessage = "Retrying path to goal...";
+            }
         }
     }
 
-    if (m_robot->state() == RobotState::REACHED_GOAL && m_robot->currentTask() == nullptr) {
-        m_state = SimState::COMPLETED;
-        m_statusMessage = "Goal reached!";
+    // State machine logic
+    if (m_robot->state() == RobotState::REACHED_GOAL) {
+        auto pos = m_robot->pos();
+        auto task = m_robot->currentTask();
+
+        if (m_grid->getCell(pos.first, pos.second).type == CellType::CHARGING_STATION) {
+            m_robot->setState(RobotState::CHARGING);
+            m_statusMessage = "Charging... (Please Wait)";
+            m_pauseTimer = 3.0f; // 3 seconds to fully charge visually
+        }
+        else if (task) {
+            if (task->status == TaskStatus::ASSIGNED && pos == task->pickupLocation) {
+                task->status = TaskStatus::PICKING;
+                m_robot->setState(RobotState::PICKING);
+                m_statusMessage = "PICKING UP ITEM... (Please Wait)";
+                m_pauseTimer = 2.0f;
+            }
+            else if (task->status == TaskStatus::PICKING && pos == task->deliveryLocation) {
+                task->status = TaskStatus::DELIVERING;
+                m_robot->setState(RobotState::DELIVERING);
+                m_statusMessage = "DELIVERING ITEM... (Please Wait)";
+                m_pauseTimer = 2.0f;
+            }
+            else {
+                // Wrong goal reached (likely due to replan failure to old goal)
+                if (task->status == TaskStatus::ASSIGNED) setRobotGoal(task->pickupLocation.first, task->pickupLocation.second);
+                else setRobotGoal(task->deliveryLocation.first, task->deliveryLocation.second);
+            }
+        } else {
+            m_state = SimState::COMPLETED;
+            m_statusMessage = "Goal reached!";
+            m_robot->setState(RobotState::IDLE);
+        }
+    }
+
+    if (m_robot->state() == RobotState::CHARGING && m_pauseTimer <= 0.0f) {
+        m_robot->chargeBattery(100.0f); // fully charge
+        m_statusMessage = "Fully Charged! Resuming task...";
+        // Resume task
+        auto task = m_robot->currentTask();
+        if (task) {
+            if (task->status == TaskStatus::ASSIGNED) setRobotGoal(task->pickupLocation.first, task->pickupLocation.second);
+            else if (task->status == TaskStatus::PICKING) setRobotGoal(task->deliveryLocation.first, task->deliveryLocation.second);
+            triggerReplan();
+        } else {
+            m_robot->setState(RobotState::IDLE);
+        }
+    }
+    else if (m_robot->state() == RobotState::PICKING && m_pauseTimer <= 0.0f) {
+        auto task = m_robot->currentTask();
+        if (task) {
+            setRobotGoal(task->deliveryLocation.first, task->deliveryLocation.second);
+            triggerReplan();
+            m_statusMessage = "Picked up item. Routing to delivery.";
+        }
+    }
+    else if (m_robot->state() == RobotState::DELIVERING && m_pauseTimer <= 0.0f) {
+        auto task = m_robot->currentTask();
+        if (task) {
+            task->status = TaskStatus::COMPLETED;
+            m_statusMessage = "Task Completed!";
+        }
+        m_robot->clearTask();
+        m_robot->setState(RobotState::IDLE);
     }
 }
 
@@ -150,7 +258,7 @@ void SimulationEngine::setRobotStart(int c, int r) {
 }
 
 void SimulationEngine::setRobotGoal(int c, int r) {
-    if (m_grid->inBounds(c, r) && m_grid->isFree(c, r)) {
+    if (m_grid->inBounds(c, r)) {
         m_robot->setGoalPos({c, r});
         m_statusMessage = "Goal position updated.";
         if (m_state == SimState::RUNNING) {
@@ -187,13 +295,19 @@ void SimulationEngine::clearObstacles() {
     m_statusMessage = "Map cleared.";
 }
 
-void SimulationEngine::loadDefaultMap() {
-    m_grid->generateRealisticWarehouse();
+void SimulationEngine::loadDefaultMap(int layoutType) {
+    m_grid->generateRealisticWarehouse(layoutType);
     
     // Add dynamic obstacles mimicking patrol workers
     m_dynObs.clear();
     m_dynObs.push_back(std::make_unique<DynamicObstacle>(0, 10, 6, ObstacleAxis::HORIZONTAL, 10, 50, 2.0f, m_config.cellSize));
     m_dynObs.push_back(std::make_unique<DynamicObstacle>(1, 30, 2, ObstacleAxis::VERTICAL, 2, 40, 3.0f, m_config.cellSize));
+    m_dynObs.push_back(std::make_unique<DynamicObstacle>(2, 20, 11, ObstacleAxis::VERTICAL, 5, 40, 2.5f, m_config.cellSize));
+    m_dynObs.push_back(std::make_unique<DynamicObstacle>(3, 10, 16, ObstacleAxis::HORIZONTAL, 10, 45, 1.8f, m_config.cellSize));
+    m_dynObs.push_back(std::make_unique<DynamicObstacle>(4, 38, 5, ObstacleAxis::VERTICAL, 5, 35, 3.2f, m_config.cellSize));
+    m_dynObs.push_back(std::make_unique<DynamicObstacle>(5, 10, 31, ObstacleAxis::HORIZONTAL, 10, 50, 2.2f, m_config.cellSize));
+    m_dynObs.push_back(std::make_unique<DynamicObstacle>(6, 48, 5, ObstacleAxis::VERTICAL, 5, 40, 2.8f, m_config.cellSize));
+    m_dynObs.push_back(std::make_unique<DynamicObstacle>(7, 5, 21, ObstacleAxis::HORIZONTAL, 5, 25, 2.0f, m_config.cellSize));
 
     m_robot->setStartPos({1, 1});
     m_robot->setGoalPos({m_config.gridCols-5, m_config.gridRows-3});
@@ -233,6 +347,24 @@ SimulationEngine::SensorReading SimulationEngine::computeSensorReading() {
         if (dx + dy <= 3) sr.obstacleDetected = true;
     }
     return sr;
+}
+
+std::pair<int,int> SimulationEngine::findNearestCharger() const {
+    std::pair<int,int> best = {-1, -1};
+    float minDist = 999999.0f;
+    for (int r = 0; r < m_grid->rows(); ++r) {
+        for (int c = 0; c < m_grid->cols(); ++c) {
+            if (m_grid->getCell(c, r).type == CellType::CHARGING_STATION) {
+                float dist = std::abs(m_robot->col() - c) + std::abs(m_robot->row() - r);
+                if (dist < minDist) {
+                    minDist = dist;
+                    best = {c, r};
+                }
+            }
+        }
+    }
+    if (best.first == -1) return {1, 5};
+    return best;
 }
 
 } // namespace warehouse

@@ -66,7 +66,7 @@ static void drawPanel(SDL_Renderer* renderer, TTF_Font* fontLg, TTF_Font* fontMd
     if (uiMode != UIMode::NORMAL) {
         std::string modeStr = "CLICK: Set Start";
         if (uiMode == UIMode::SET_GOAL) modeStr = "CLICK: Set Goal";
-        else if (uiMode == UIMode::ASSIGN_TASK) modeStr = "CLICK: Assign Pickup";
+        else if (uiMode == UIMode::ASSIGN_TASK) modeStr = "CLICK MAP: Pickup -> Dropoff";
         SDL_SetRenderDrawColor(renderer, Colors::ACCENT.r, Colors::ACCENT.g, Colors::ACCENT.b, 60);
         SDL_Rect mb{px+5, ty-2, PANEL_W-10, 18}; SDL_RenderFillRect(renderer, &mb);
         drawText(renderer, fontSm, modeStr, Colors::ACCENT, px+10, ty); ty += 20;
@@ -76,7 +76,7 @@ static void drawPanel(SDL_Renderer* renderer, TTF_Font* fontLg, TTF_Font* fontMd
     for (const auto& btn : buttons) btn->draw(renderer, fontMd);
 
     // Dynamic stats
-    ty = 460;
+    ty = 330;
     SDL_SetRenderDrawColor(renderer, Colors::PANEL_BORDER.r, Colors::PANEL_BORDER.g, Colors::PANEL_BORDER.b, 255);
     SDL_RenderDrawLine(renderer, px+5, ty-4, px+PANEL_W-5, ty-4);
 
@@ -88,6 +88,23 @@ static void drawPanel(SDL_Renderer* renderer, TTF_Font* fontLg, TTF_Font* fontMd
         drawText(renderer, fontSm, v, c, px+100, ty);
         ty += 16;
     };
+
+    drawText(renderer, fontMd, "LEGEND", Colors::TEXT_BRIGHT, px+8, ty); ty += 18;
+    auto drawLeg = [&](const std::string& name, Color c) {
+        SDL_SetRenderDrawColor(renderer, c.r, c.g, c.b, 255);
+        SDL_Rect r{px+8, ty, 10, 10};
+        SDL_RenderFillRect(renderer, &r);
+        drawText(renderer, fontSm, name, Colors::TEXT, px+24, ty-2);
+        ty += 14;
+    };
+    drawLeg("Robot", Colors::ROBOT);
+    drawLeg("Static Shelf", Colors::SHELF);
+    drawLeg("Charging Station", Colors::CHARGING_STATION);
+    drawLeg("Loading Zone", Colors::LOADING_ZONE);
+    drawLeg("Pickup Station", Colors::PICKUP_STATION);
+    drawLeg("Dynamic Worker", Colors::DYN_OBS);
+    drawLeg("Custom Wall", Colors::CELL_OBSTACLE);
+    ty += 8;
 
     drawText(renderer, fontMd, "ROBOT STATUS", Colors::TEXT_BRIGHT, px+8, ty); ty += 18;
     stat("State:", robotStateStr(robot.state()));
@@ -232,13 +249,27 @@ int main(int argc, char* argv[]) {
     }, {160,80,50});
 
     addBtn("Generate Warehouse", [&]{
+        static int currentLayout = 0;
+        currentLayout = (currentLayout + 1) % 3;
         std::lock_guard<std::mutex> lock(sim.stateMutex);
-        sim.loadDefaultMap();
+        sim.loadDefaultMap(currentLayout);
     });
 
-    addBtn("Assign Task", [&]{
+    addBtn("Assign Task (Manual)", [&]{
         uiMode = UIMode::ASSIGN_TASK;
     });
+
+    bool continuousDemo = false;
+
+    addBtn("Continuous Demo: OFF", [&]{
+        continuousDemo = !continuousDemo;
+        buttons[3]->setLabel(continuousDemo ? "Continuous Demo: ON " : "Continuous Demo: OFF");
+        buttons[3]->setToggled(continuousDemo);
+        if (continuousDemo) {
+            std::lock_guard<std::mutex> lock(sim.stateMutex);
+            sim.start();
+        }
+    }, Colors::ACCENT);
 
     by += 4;
     addBtn("Debug LiDAR: OFF", [&]{
@@ -273,6 +304,40 @@ int main(int argc, char* argv[]) {
             else if (st == SimState::PAUSED) btnStart->setLabel("RESUME");
             else btnStart->setLabel("START");
         }
+
+        // --- CONTINUOUS DEMO LOGIC ---
+        if (continuousDemo) {
+            std::lock_guard<std::mutex> lock(sim.stateMutex);
+            if (sim.robot().state() == RobotState::IDLE && sim.robot().batteryPercentage() > 25.0f && !sim.robot().currentTask()) {
+                std::vector<std::pair<int,int>> pickZones;
+                std::vector<std::pair<int,int>> dropZones;
+                for (int r = 0; r < cfg.gridRows; ++r) {
+                    for (int c = 0; c < cfg.gridCols; ++c) {
+                        auto type = sim.grid().getCell(c, r).type;
+                        if (type == warehouse::CellType::PICKUP_STATION) pickZones.push_back({c, r});
+                        if (type == warehouse::CellType::LOADING_ZONE) dropZones.push_back({c, r});
+                    }
+                }
+                
+                if (!pickZones.empty() && !dropZones.empty()) {
+                    auto p = pickZones[rand() % pickZones.size()];
+                    auto d = dropZones[rand() % dropZones.size()];
+                    sim.assignTask(p.first, p.second, d.first, d.second);
+                } else {
+                    // Fallback to random if map doesn't have these zones
+                    int pc = 2 + rand() % (cfg.gridCols - 4);
+                    int pr = 2 + rand() % (cfg.gridRows - 4);
+                    while (!sim.grid().isFree(pc, pr)) { pc++; if(pc>=cfg.gridCols) {pc=2; pr++; if(pr>=cfg.gridRows) pr=2;} }
+                    
+                    int dc = 2 + rand() % (cfg.gridCols - 4);
+                    int dr = 2 + rand() % (cfg.gridRows - 4);
+                    while (!sim.grid().isFree(dc, dr)) { dc++; if(dc>=cfg.gridCols) {dc=2; dr++; if(dr>=cfg.gridRows) dr=2;} }
+                    
+                    sim.assignTask(pc, pr, dc, dr);
+                }
+            }
+        }
+        // -----------------------------
 
         SDL_Event event;
         while (SDL_PollEvent(&event)) {

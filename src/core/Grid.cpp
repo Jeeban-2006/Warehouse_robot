@@ -71,7 +71,7 @@ void Grid::clear() {
     }
 }
 
-void Grid::generateRealisticWarehouse() {
+void Grid::generateRealisticWarehouse(int layoutType) {
     clear();
     
     // Top and Bottom Aisle margins
@@ -100,16 +100,36 @@ void Grid::generateRealisticWarehouse() {
         placeObject(std::make_shared<ChargingStation>(1, r, "Charger_" + std::to_string(r) + "_B"));
     }
     
-    // Place Loading Zones on the bottom right
-    for (int c = m_cols - 12; c < m_cols - 2; ++c) {
-        for (int r = m_rows - 4; r < m_rows - 1; ++r) {
+    int pickStartC, pickStartR, loadStartC, loadStartR;
+    
+    if (layoutType == 0) {
+        // Layout 0: Pickup Top-Right, Loading Bottom-Right (Original)
+        pickStartC = m_cols - 12; pickStartR = 1;
+        loadStartC = m_cols - 12; loadStartR = m_rows - 4;
+    } else if (layoutType == 1) {
+        // Layout 1: Pickup Top-Left, Loading Bottom-Right (Cross Map)
+        pickStartC = 2; pickStartR = 1;
+        loadStartC = m_cols - 12; loadStartR = m_rows - 4;
+    } else {
+        // Layout 2: Pickup Bottom-Left, Loading Top-Right (Cross Map 2)
+        pickStartC = 2; pickStartR = m_rows - 4;
+        loadStartC = m_cols - 12; loadStartR = 1;
+    }
+    
+    // Place Loading Zones
+    for (int c = loadStartC; c < loadStartC + 10; ++c) {
+        for (int r = loadStartR; r < loadStartR + 3; ++r) {
+            // Remove any shelves that might have generated here
+            m_cells[idx(c, r)].type = CellType::FREE;
             placeObject(std::make_shared<LoadingZone>(c, r, "LoadingZone"));
         }
     }
     
-    // Place Pickup Stations on the top right
-    for (int c = m_cols - 12; c < m_cols - 2; ++c) {
-        for (int r = 1; r < 4; ++r) {
+    // Place Pickup Stations
+    for (int c = pickStartC; c < pickStartC + 10; ++c) {
+        for (int r = pickStartR; r < pickStartR + 3; ++r) {
+            // Remove any shelves that might have generated here
+            m_cells[idx(c, r)].type = CellType::FREE;
             placeObject(std::make_shared<PickupStation>(c, r, "PickupZone"));
         }
     }

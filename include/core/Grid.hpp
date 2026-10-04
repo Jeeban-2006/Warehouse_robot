@@ -27,7 +27,7 @@ public:
     void clear();
 
     // Map generators
-    void generateRealisticWarehouse();
+    void generateRealisticWarehouse(int layoutType = 0);
     void generateRandom(float density, const std::vector<std::pair<int,int>>& protectedCells = {});
     
     // A* Helpers

@@ -1,108 +1,114 @@
-# Autonomous Warehouse Robot Pathfinding & Obstacle Simulator
+# Enterprise Autonomous Warehouse Robot Simulator (v3.0)
 
-A complete Linux-based C++ simulation of an autonomous warehouse robot, featuring a custom A* pathfinding engine, dynamic obstacle avoidance, thread-safe synchronization, and a simulated Linux kernel character device driver.
+![C++17](https://img.shields.io/badge/C++-17-blue.svg)
+![SDL2](https://img.shields.io/badge/SDL2-Graphics-green.svg)
+![Linux](https://img.shields.io/badge/Linux-System%20Programming-orange.svg)
+![Build](https://img.shields.io/badge/Build-CMake-lightgrey.svg)
 
-This project was developed for the **Embedded Systems / Linux training program**.
+A high-performance, strictly multi-threaded autonomous robotics simulator written in C++17. Designed as an industrial showcase, this system features a custom A* pathfinding engine, a predictive Battery Management System (BMS), interactive raycasted LiDAR, and an underlying architecture built for Linux character device drivers.
 
-## Features
+---
 
-- **Custom A* Pathfinding**: Implemented entirely from scratch in C++ (no external routing libraries). Features priority queues, heuristic optimization, and path validity checking.
-- **Dynamic Obstacle Avoidance**: Dynamic obstacles bounce along predefined axes. The robot's simulation engine replans the path automatically if the current route becomes blocked.
-- **System Programming**: Utilizes POSIX/C++17 threading, mutexes, condition variables, atomic types, and signal handling for a smooth, lock-safe multi-threaded simulation.
-- **Linux Device Driver Interface**: A custom C kernel module (`warehouse_sensor_driver.c`) acts as a virtual character device (`/dev/warehouse_sensor`). The C++ application communicates via `ioctl`, `read`, `write`, and `poll`.
-- **SDL2 Visualization**: A fully custom-built renderer and UI using SDL2 and SDL2_ttf.
-- **Thread Architecture**:
-  1.  **Main (UI) Thread**: SDL2 event polling, rendering loop.
-  2.  **Simulation Thread**: Updates robot kinematics and grid state at a steady 60Hz.
-  3.  **Sensor Thread**: Translates simulation events into driver payloads and syncs with the kernel module.
+## 🌟 Key Features
 
-## Architecture
+### 1. Advanced A* Pathfinding Engine
+- **Custom Built**: A* implementation written entirely from scratch utilizing `std::priority_queue`, dynamic heuristic weighting, and real-time path validation.
+- **Dynamic Replanning**: Seamlessly handles moving workers or user-drawn walls. If the path is blocked, the engine halts, recalculates, and reroutes under 1 millisecond.
+- **Auto-Retry Deadlock Prevention**: If the robot is perfectly cornered by moving obstacles, it enters a smart `WAITING` state, polling the grid and resuming automatically the moment the path clears.
 
+### 2. Predictive Battery Management System (BMS)
+- **Smart Prediction Math**: The robot calculates the exact grid distance to its current package destination *plus* the distance from the destination back to the nearest charging station.
+- **Emergency Overrides**: If the calculated battery cost exceeds current capacity, the robot aborts its task, intelligently routes to the nearest of 20 available chargers, docks for a 3-second charge, and instantly resumes its previous mission upon hitting 100%.
+- **Physical Consequences**: If battery drain reaches exactly 0.0%, the system correctly transitions into a permanent `SYSTEM DEAD` error state requiring a physical reset.
+
+### 3. Realistic Continuous Task Engine
+- **Dedicated Zoning**: The warehouse features structured logic zones (Purple Pickup Stations and Yellow Loading Zones).
+- **Infinite Mission Loop**: The `Continuous Demo` mode dynamically generates missions, forcing the robot to travel from the storage sector to the shipping sector, effectively simulating a real-life industrial loop.
+- **Layout Switching**: Easily toggle between 3 different map architectures (Standard, Cross Map 1, Cross Map 2) to force complex diagonal routes across the warehouse floor.
+
+### 4. Interactive Simulation & UI
+- **Real-time Map Editing**: Left-click to draw concrete walls on the floor while the robot is moving to test its instant reflex replanning. Right-click to delete walls.
+- **Dynamic 360° LiDAR**: Toggle `Debug LiDAR` to visualize live raycasting from the robot's center, detecting dynamic obstacles and static walls in real time.
+- **Professional Dashboard**: Telemetry dashboard providing live updates on `Robot State`, `Mission Status`, `A* Replanning Times (ms)`, `Battery %`, and an embedded `Color Legend`.
+
+### 5. Multithreading & Linux System Programming
+- **Thread Safety**: Fully detached `std::thread` architecture utilizing strict `std::mutex`, `std::lock_guard`, and `std::atomic` variables for zero-tear grid state sharing.
+- **Linux Kernel Driver Ready**: Designed to seamlessly interface with a custom C kernel module (`/dev/warehouse_sensor`) using `ioctl`, `read`, `write`, and `poll`. Fallbacks to a `SIMULATED` software driver on WSL/Windows kernels.
+
+---
+
+## 🛠 Architecture
+
+```text
+UI Renderer (SDL2) <---+---> Simulation Engine (Thread 1)
+                       |        ├── Task & Battery State Machine
+                       |        ├── Grid & Warehouse Objects
+                       |        └── A* Pathfinding Planner
+                       |
+Sensor Interface  <----+---> Sensor Engine (Thread 2)
+                       |        └── LiDAR 360 Raycasting Logic
+                       |
+Kernel Module     <----+---> /dev/warehouse_sensor
+                       |        └── Real hardware/driver IO abstraction
 ```
-App -> SimulationEngine -> Grid / Robot / DynamicObstacles / AStarPlanner
-          |
-          v
-      SensorDevice (C++ Wrapper)
-          |
-         poll() / ioctl() / read() / write()
-          |
-[ Linux Kernel Mode ] -> /dev/warehouse_sensor (Miscdevice Driver)
-```
 
-## Prerequisites (Linux / WSL2 Ubuntu)
+---
 
-Install dependencies:
+## 🚀 Getting Started
+
+### Prerequisites (Ubuntu / Debian / WSL2)
 ```bash
 sudo apt-get update
 sudo apt-get install build-essential cmake libsdl2-dev libsdl2-ttf-dev libsdl2-image-dev pkg-config git linux-headers-$(uname -r)
 ```
 
-*(Note: On WSL2 custom Microsoft kernels, `linux-headers` might not be available via apt. In that case, the C++ application gracefully falls back to a simulated sensor mode).*
-
-## Building
-
+### Build Instructions
 ```bash
+git clone <repository_url>
 cd warehouse_robot
 mkdir build && cd build
 cmake ..
-cmake --build . -j$(nproc)
+make -j$(nproc)
 ```
 
-## Running the Simulator
-
+### Run the Simulator
 ```bash
 ./build/warehouse_robot
 ```
 
-### Controls:
-- **SPACE**: Start / Pause
-- **R**: Reset Simulation
-- **F**: Find Path (without moving)
-- **S / G**: Enter "Set Start" or "Set Goal" mode (Click on grid)
-- **Left Click**: Place static obstacle
-- **Right Click**: Remove static obstacle
-- **D**: Toggle Debug Overlay
+---
 
-## Running Tests
+## 🎮 Simulator Controls
 
+| Input | Action |
+| --- | --- |
+| **START Button** | Initiates the current manual task. |
+| **Continuous Demo** | Automates infinite Pickup -> Delivery routes. |
+| **Generate Warehouse**| Cycles through 3 different building layouts to force new routes. |
+| **Left Click Grid** | Places a static gray wall block (Forces instant replan). |
+| **Right Click Grid**| Deletes a static wall block. |
+| **Debug LiDAR** | Renders 360-degree sensor hit-markers. |
+
+---
+
+## 📖 UI Legend
+
+- 🟩 **Robot**: The autonomous vehicle.
+- 🟧 **Static Shelf**: Permanent storage racking.
+- 🟦 **Charging Station**: Docking zones along the left wall.
+- 🟨 **Loading Zone**: Shipping/delivery zone.
+- 🟪 **Pickup Station**: Package generation zone.
+- 🟥 **Dynamic Worker**: Moving obstacles the robot must dodge.
+- ⬛ **Custom Wall**: Interactive blocks placed by the user.
+
+---
+
+## 🧪 Documentation & Testing
+
+Comprehensive, highly detailed documentation mapping every step of the software development lifecycle (PRD, Requirements Traceability, UML Diagrams, Implementation Plans, Testing Metrics) is located in the `docs/` directory.
+
+To run the automated C++ unit tests testing the core grid logic and A* math without the UI:
 ```bash
 cd build
 ctest --output-on-failure
 ```
-Or run the headless CLI test:
-```bash
-./build/warehouse_cli
-```
-
-## Testing the Kernel Driver
-
-If you are on a native Linux environment with matching kernel headers:
-
-1. Build and load the driver:
-```bash
-cd driver
-make
-sudo make load
-```
-2. Verify the device:
-```bash
-ls -l /dev/warehouse_sensor
-```
-3. Run the driver test tool:
-```bash
-../build/sensor_test
-```
-4. Unload:
-```bash
-sudo make unload
-```
-
-## Documentation
-
-Full documentation is available in the `docs/` folder, structured across the 6 project stages:
-- **Stage 1**: Introduction, Checklists
-- **Stage 2**: Requirements (PRD, FR, NFR, Use Cases)
-- **Stage 3**: Architecture, Component Design, UML
-- **Stage 4**: Prototype progress
-- **Stage 5**: Test Results, Metrics, Code Quality
-- **Stage 6**: Final Report, Viva Questions, Demo Script

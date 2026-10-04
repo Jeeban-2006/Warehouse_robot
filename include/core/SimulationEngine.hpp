@@ -54,7 +54,7 @@ public:
     void setObstacle(int c, int r, bool isObs);
     void removeObstacle(int c, int r);
     void clearObstacles();
-    void loadDefaultMap();
+    void loadDefaultMap(int layoutType = 0);
     void generateRandomMap(float density);
     void findPathOnly(); // Used for debug/viz
 
@@ -88,6 +88,7 @@ public:
 private:
     void triggerReplan();
     void updateSensorData();
+    std::pair<int,int> findNearestCharger() const;
 
     SimConfig m_config;
     SimState m_state;
@@ -104,6 +105,7 @@ private:
     
     int m_taskCounter{0};
     float m_replanTimer{0.0f};
+    float m_pauseTimer{0.0f};
     int m_sensorSeq{0};
 };
 
