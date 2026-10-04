@@ -5,6 +5,10 @@
 ![Linux](https://img.shields.io/badge/Linux-System%20Programming-orange.svg)
 ![Build](https://img.shields.io/badge/Build-CMake-lightgrey.svg)
 
+<p align="center">
+  <img src="assets/simulator_demo.png" alt="Warehouse Simulator UI" width="800">
+</p>
+
 A high-performance, strictly multi-threaded autonomous robotics simulator written in C++17. Designed as an industrial showcase, this system features a custom A* pathfinding engine, a predictive Battery Management System (BMS), interactive raycasted LiDAR, and an underlying architecture built for Linux character device drivers.
 
 ---
@@ -39,17 +43,35 @@ A high-performance, strictly multi-threaded autonomous robotics simulator writte
 
 ## 🛠 Architecture
 
-```text
-UI Renderer (SDL2) <---+---> Simulation Engine (Thread 1)
-                       |        ├── Task & Battery State Machine
-                       |        ├── Grid & Warehouse Objects
-                       |        └── A* Pathfinding Planner
-                       |
-Sensor Interface  <----+---> Sensor Engine (Thread 2)
-                       |        └── LiDAR 360 Raycasting Logic
-                       |
-Kernel Module     <----+---> /dev/warehouse_sensor
-                       |        └── Real hardware/driver IO abstraction
+```mermaid
+flowchart TD
+    subgraph UI["UI & Visualization (Thread 0)"]
+        Renderer[SDL2 UI Renderer]
+    end
+
+    subgraph Sim["Simulation Engine (Thread 1)"]
+        State[Task & Battery State Machine]
+        Grid[Grid & Warehouse Objects]
+        Planner[A* Pathfinding Planner]
+    end
+
+    subgraph Sensors["Sensor Engine (Thread 2)"]
+        Lidar[LiDAR 360 Raycasting Logic]
+        Interface[Sensor Interface]
+    end
+
+    subgraph Kernel["Linux OS"]
+        Driver[/dev/warehouse_sensor\]
+    end
+
+    Renderer <-->|Shared State Lock| Sim
+    State <--> Grid
+    State <--> Planner
+    
+    Sim <-->|Positions & Obstacles| Sensors
+    Lidar --> Interface
+    
+    Interface <-->|ioctl, read, write, poll| Driver
 ```
 
 ---
